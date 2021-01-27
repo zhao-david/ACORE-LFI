@@ -16,7 +16,7 @@ from qr_algorithms.complete_list import classifier_cde_dict
 from models.sen_poisson import SenPoissonLoader
 from models.camelus_wl import CamelusSimLoader
 from utils.qr_functions import train_qr_algo
-from utils.functions import train_clf, compute_statistics_single_t0
+from utils.functions import train_clf, compute_statistics_single_t0, compute_bayesfactor_single_t0
 
 
 model_dict = {
@@ -25,7 +25,7 @@ model_dict = {
 }
 
 
-def main(b, b_prime, alpha, classifier, class_cde, sample_size_obs, run, t_star, c_star,
+def main(b, b_prime, alpha, classifier, class_cde, sample_size_obs, run, t_star, c_star, test_statistic,
          debug=False, seed=7, n_sampled=500, size_reference=1000):
 
     # Setup the variables, also to account for debug runs
@@ -46,6 +46,7 @@ def main(b, b_prime, alpha, classifier, class_cde, sample_size_obs, run, t_star,
     # Get the correct functions
     msnh_sampling_func = model_obj.sample_msnh_algo5
     grid_param = model_obj.grid
+    gen_param_fun = model_obj.sample_param_values
     clf_model = classifier_dict[classifier]
     gen_sample_func = model_obj.generate_sample
     t0_grid = model_obj.grid
@@ -77,10 +78,28 @@ def main(b, b_prime, alpha, classifier, class_cde, sample_size_obs, run, t_star,
 
         pbar = tqdm(total=len(t0_grid), desc='Calculate Odds')
         tau_obs = []
-        for theta_0 in t0_grid:
-            tau_obs.append(compute_statistics_single_t0(
-                clf=clf, obs_sample=x_obs, t0=theta_0, d=model_obj.d, d_obs=model_obj.d_obs, grid_param_t1=grid_param))
-            pbar.update(1)
+        if test_statistic == 'acore':
+            for theta_0 in t0_grid:
+                tau_obs.append(compute_statistics_single_t0(
+                    clf=clf, obs_sample=x_obs, t0=theta_0, d=model_obj.d, d_obs=model_obj.d_obs,
+                    grid_param_t1=grid_param))
+                pbar.update(1)
+        elif test_statistic == 'avgacore':
+            for theta_0 in t0_grid:
+                tau_obs.append(compute_bayesfactor_single_t0(
+                                clf=clf, obs_sample=x_obs, t0=theta_0,
+                                gen_param_fun=gen_param_fun, d=model_obj.d, d_obs=model_obj.d_obs))
+                pbar.update(1)
+        elif test_statistic == 'logavgacore':
+            for theta_0 in t0_grid:
+                tau_obs.append(compute_bayesfactor_single_t0(
+                    clf=clf, obs_sample=x_obs, t0=theta_0, log_out=True,
+                    gen_param_fun=gen_param_fun, d=model_obj.d, d_obs=model_obj.d_obs))
+                pbar.update(1)
+        else:
+            raise ValueError('The variable test_statistic needs to be either acore, avgacore, logavgacore.'
+                             ' Currently %s' % test_statistic)
+
         tau_obs = np.array(tau_obs)
         pred_time = datetime.now()
 
@@ -114,9 +133,21 @@ def main(b, b_prime, alpha, classifier, class_cde, sample_size_obs, run, t_star,
                     x_obs=sample_mat[kk, :, :], t0_val=theta_0,
                     meshgrid=grid_param) for kk, theta_0 in enumerate(theta_mat)])
         else:
-            stats_mat = np.array([compute_statistics_single_t0(
-                clf=clf, d=model_obj.d, d_obs=model_obj.d_obs, grid_param_t1=grid_param,
-                t0=theta_0, obs_sample=sample_mat[kk, :, :]) for kk, theta_0 in enumerate(theta_mat)])
+            if test_statistic == 'acore':
+                stats_mat = np.array([compute_statistics_single_t0(
+                    clf=clf, d=model_obj.d, d_obs=model_obj.d_obs, grid_param_t1=grid_param,
+                    t0=theta_0, obs_sample=sample_mat[kk, :, :]) for kk, theta_0 in enumerate(theta_mat)])
+            elif test_statistic == 'avgacore':
+                stats_mat = np.array([compute_bayesfactor_single_t0(
+                    clf=clf, obs_sample=sample_mat[kk, :, :], t0=theta_0, gen_param_fun=gen_param_fun,
+                    d=model_obj.d, d_obs=model_obj.d_obs) for kk, theta_0 in enumerate(theta_mat)])
+            elif test_statistic == 'logavgacore':
+                stats_mat = np.array([compute_bayesfactor_single_t0(
+                    clf=clf, obs_sample=sample_mat[kk, :, :], t0=theta_0, gen_param_fun=gen_param_fun, log_out=True,
+                    d=model_obj.d, d_obs=model_obj.d_obs) for kk, theta_0 in enumerate(theta_mat)])
+            else:
+                raise ValueError('The variable test_statistic needs to be either acore, avgacore, logavgacore.'
+                                 ' Currently %s' % test_statistic)
         bprime_time = datetime.now()
         clf_params = classifier_cde_dict[class_cde]
 
@@ -155,10 +186,11 @@ def main(b, b_prime, alpha, classifier, class_cde, sample_size_obs, run, t_star,
         't_star': t_star,
         'time_vec': time_vec
     }
-    outfile_name = '2d_confint_%s_data_b_%s_bprime_%s_%s_%s_n%s_%s_%s_%s_%s%s_%s.pkl' % (
+    outfile_name = '2d_confint_%s_data_b_%s_bprime_%s_%s_%s_n%s_%s_%s_%s_%s%s_%s_%s.pkl' % (
         run, b, b_prime, t0_val[0], t0_val[1], sample_size_obs, classifier, class_cde, n_sampled,
         '' if not t_star else '_taustar',
         '' if not c_star else '_cstar',
+        test_statistic,
         datetime.strftime(datetime.today(), '%Y-%m-%d')
     )
     outdir = 'sims/%s' % model_obj.out_directory
@@ -200,12 +232,13 @@ def main(b, b_prime, alpha, classifier, class_cde, sample_size_obs, run, t_star,
             '' if not c_star else ', c_star'), fontsize=25)
 
     plt.tight_layout()
-    image_name = '2d_confint_%s_b_%s_bprime_%s_%s_%s_%s_n%s%s%s_%s.pdf' % (
+    image_name = '2d_confint_%s_b_%s_bprime_%s_%s_%s_%s_n%s%s%s_%s_%s.pdf' % (
         run, b, b_prime, t0_val[0], t0_val[1], sample_size_obs, classifier,
         '' if not t_star else '_taustar',
         '' if not c_star else '_cstar',
+        test_statistic,
         datetime.strftime(datetime.today(), '%Y-%m-%d'))
-    plt.savefig('images/%s/' % model_obj.out_directory + image_name)
+    plt.savefig('images/%s' % model_obj.out_directory + image_name)
 
 
 if __name__ == '__main__':
@@ -237,6 +270,8 @@ if __name__ == '__main__':
                         help='Number of values to sample for c_star calculation.')
     parser.add_argument('--size_reference', action="store", type=int, default=1000,
                         help='Number of samples used for the reference distribution')
+    parser.add_argument('--test_statistic', action="store", type=str, default='acore',
+                        help='Test statistic to compute confidence intervals. Can be acore|avgacore|logavgacore')
     argument_parsed = parser.parse_args()
 
     main(
@@ -252,5 +287,6 @@ if __name__ == '__main__':
         c_star=argument_parsed.c_star,
         class_cde=argument_parsed.class_cde,
         n_sampled=argument_parsed.n_sampled,
-        size_reference=argument_parsed.size_reference
+        size_reference=argument_parsed.size_reference,
+        test_statistic=argument_parsed.test_statistic
     )
